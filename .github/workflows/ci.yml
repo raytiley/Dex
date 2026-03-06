@@ -16,6 +16,8 @@ jobs:
           pip install pytest ruff
           pip install mcp pyyaml python-dateutil requests
       - run: npm ci
+      - name: Create vault directories
+        run: python -c "from core import paths; from pathlib import Path; [getattr(paths, n).mkdir(parents=True, exist_ok=True) for n in dir(paths) if n.endswith('_DIR') and isinstance(getattr(paths, n), Path)]"
       - name: Generate paths.json
         run: python core/paths.py
       - name: Path contract tests
