@@ -150,18 +150,6 @@ fi
 # Skip .env creation - it's created during /setup if needed
 # (Most users don't need API keys - everything works through Cursor)
 
-# Create .mcp.json with current path and correct Python command
-if [ ! -f .mcp.json ]; then
-    echo ""
-    echo "📝 Creating .mcp.json with workspace path..."
-    CURRENT_PATH="$(pwd)"
-    
-    # Use the Python command we detected earlier (python3 or python)
-    sed "s|{{VAULT_PATH}}|$CURRENT_PATH|g; s|\"python\"|\"$PYTHON_CMD\"|g" System/.mcp.json.example > .mcp.json
-    echo "   MCP servers configured for: $CURRENT_PATH"
-    echo "   Python command: $PYTHON_CMD"
-fi
-
 # Sync MCP servers to Cursor and Claude Desktop
 echo ""
 echo "🔄 Syncing MCP servers to AI clients..."
@@ -182,73 +170,85 @@ else
     echo "   Install Granola from https://granola.ai for meeting transcription"
 fi
 
-# Install Python dependencies for Work MCP (CRITICAL for task sync)
+# Install Python dependencies in a virtual environment (CRITICAL for task sync)
 echo ""
 echo "📦 Installing Python dependencies for Work MCP..."
 
-# Determine pip command (pip3 or pip)
-PIP_CMD=""
-if command -v pip3 &> /dev/null; then
-    PIP_CMD="pip3"
-elif command -v pip &> /dev/null; then
-    PIP_CMD="pip"
+VENV_DIR="$(pwd)/.venv"
+
+if [ -d "$VENV_DIR" ] && [ -f "$VENV_DIR/bin/python3" -o -f "$VENV_DIR/Scripts/python.exe" ]; then
+    echo "   Using existing virtual environment at .venv/"
+else
+    echo "   Creating virtual environment..."
+    if ! $PYTHON_CMD -m venv "$VENV_DIR" 2>/dev/null; then
+        echo "❌ Could not create virtual environment"
+        echo ""
+        echo "Try manually:"
+        echo "  $PYTHON_CMD -m venv .venv"
+        echo "  .venv/bin/pip install mcp pyyaml"
+        echo ""
+        read -p "Press Enter to continue setup (you can fix this later)..."
+        VENV_DIR=""
+    fi
 fi
 
-if [ -n "$PIP_CMD" ]; then
-    # First, try to upgrade pip (silently, many users have old pip versions)
-    echo "   Upgrading pip..."
-    $PYTHON_CMD -m pip install --upgrade pip --quiet 2>/dev/null || true
-    
-    # Try standard install first
-    if $PIP_CMD install mcp pyyaml --quiet 2>/dev/null; then
-        echo "✅ Work MCP dependencies installed"
+if [ -n "$VENV_DIR" ]; then
+    # Determine venv pip/python paths (cross-platform)
+    if [ -f "$VENV_DIR/bin/pip" ]; then
+        VENV_PIP="$VENV_DIR/bin/pip"
+        VENV_PYTHON="$VENV_DIR/bin/python3"
+    elif [ -f "$VENV_DIR/Scripts/pip.exe" ]; then
+        VENV_PIP="$VENV_DIR/Scripts/pip.exe"
+        VENV_PYTHON="$VENV_DIR/Scripts/python.exe"
     else
-        # Try with --user flag (works around permission issues)
-        echo "   Trying with --user flag..."
-        if $PIP_CMD install --user mcp pyyaml --quiet 2>/dev/null; then
-            echo "✅ Work MCP dependencies installed (user mode)"
-        else
-            echo "❌ Could not install Python dependencies"
-            echo ""
-            echo "Work MCP is critical - it syncs tasks across all your files."
-            echo "Without it, checking off a task in one place won't update others."
-            echo ""
-            echo "Try manually (upgrade pip first):"
-            echo "  $PYTHON_CMD -m pip install --upgrade pip"
-            echo "  $PIP_CMD install --user mcp pyyaml"
-            echo ""
-            read -p "Press Enter to continue setup (you can fix this later)..."
-        fi
+        echo "❌ Virtual environment created but pip not found inside it"
+        VENV_DIR=""
     fi
-else
-    echo "❌ pip not found (usually comes with Python)"
-    echo ""
-    if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "win32" ]]; then
-        echo "This usually means Python wasn't added to PATH during installation."
+fi
+
+if [ -n "$VENV_DIR" ]; then
+    if $VENV_PIP install mcp pyyaml --quiet 2>&1; then
+        echo "✅ Work MCP dependencies installed (in .venv/)"
+    else
+        echo "❌ Could not install Python dependencies"
         echo ""
-        echo "Fix:"
-        echo "  1. Reinstall Python from https://www.python.org/downloads/"
-        echo "  2. Check 'Add Python to PATH' during installation"
-        echo "  3. Restart your terminal and run ./install.sh again"
-    else
-        echo "This is unusual - Python is installed but pip is missing."
-        echo "Try reinstalling Python from https://www.python.org/downloads/"
+        echo "Try manually:"
+        echo "  $VENV_PIP install mcp pyyaml"
+        echo ""
+        read -p "Press Enter to continue setup (you can fix this later)..."
     fi
+fi
+
+# Create .mcp.json with current path and venv Python path
+if [ ! -f .mcp.json ]; then
     echo ""
-    read -p "Press Enter to continue setup (Work MCP won't work until fixed)..."
+    echo "📝 Creating .mcp.json with workspace path..."
+    CURRENT_PATH="$(pwd)"
+
+    # Use the venv Python if available, otherwise fall back to system Python
+    if [ -n "$VENV_DIR" ] && [ -n "$VENV_PYTHON" ]; then
+        MCP_PYTHON="$VENV_PYTHON"
+    else
+        MCP_PYTHON="$PYTHON_CMD"
+    fi
+
+    sed "s|{{VAULT_PATH}}|$CURRENT_PATH|g; s|\"python\"|\"$MCP_PYTHON\"|g" System/.mcp.json.example > .mcp.json
+    echo "   MCP servers configured for: $CURRENT_PATH"
+    echo "   Python command: $MCP_PYTHON"
 fi
 
 # Verify Work MCP setup
 echo ""
 echo "🔍 Verifying Work MCP setup..."
-if [ -n "$PYTHON_CMD" ]; then
-    if $PYTHON_CMD -c "import mcp, yaml" 2>/dev/null; then
+VERIFY_PYTHON="${VENV_PYTHON:-$PYTHON_CMD}"
+if [ -n "$VERIFY_PYTHON" ]; then
+    if $VERIFY_PYTHON -c "import mcp, yaml" 2>/dev/null; then
         echo "✅ Work MCP verified - task sync will work"
         WORK_MCP_STATUS="✅ Working"
 
         # Generate path constants for CJS/TS consumers
         echo "Generating path constants..."
-        VAULT_PATH="$(pwd)" $PYTHON_CMD core/paths.py 2>/dev/null || true
+        VAULT_PATH="$(pwd)" $VERIFY_PYTHON core/paths.py 2>/dev/null || true
     else
         echo "⚠️  Work MCP not working - task sync won't function"
         WORK_MCP_STATUS="⚠️  Needs attention"
